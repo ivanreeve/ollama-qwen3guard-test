@@ -7,19 +7,23 @@ import os
 import sys
 from pathlib import Path
 
-import requests
 from tabulate import tabulate
 from tqdm import tqdm
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Test Qwen3Guard PII detection via vLLM OpenAI-compatible API"
+        description="Test Qwen3Guard PII detection via API or local transformers inference"
     )
     parser.add_argument(
         "--model",
         default="Qwen/Qwen3Guard-Gen-4B",
-        help="Model name exposed by vLLM (default: Qwen/Qwen3Guard-Gen-4B)",
+        help="Model name (default: Qwen/Qwen3Guard-Gen-4B)",
+    )
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="Run inference locally via transformers instead of calling an API",
     )
     parser.add_argument(
         "--api-base",
@@ -45,13 +49,54 @@ def parse_args():
     )
     parser.add_argument("--output", type=Path, help="Save full results to JSON file")
     parser.add_argument(
+        "--4bit",
+        action="store_true",
+        dest="quantize_4bit",
+        help="Use 4-bit quantization via bitsandbytes (requires --local)",
+    )
+    parser.add_argument(
         "--verbose", action="store_true", help="Show per-query raw model output"
     )
     return parser.parse_args()
 
 
+def load_local_model(model_name, quantize_4bit=False):
+    """Load model and tokenizer for local transformers inference."""
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    print(f"Loading {model_name} locally (4-bit={quantize_4bit})...")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    load_kwargs = {"device_map": "auto"}
+    if quantize_4bit:
+        from transformers import BitsAndBytesConfig
+
+        load_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype="float16",
+        )
+    else:
+        load_kwargs["torch_dtype"] = "auto"
+
+    model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
+    print("Model loaded.")
+    return model, tokenizer
+
+
+def query_local_model(model, tokenizer, query):
+    """Run inference locally via transformers."""
+    messages = [{"role": "user", "content": query}]
+    text = tokenizer.apply_chat_template(messages, tokenize=False)
+    model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
+    generated_ids = model.generate(**model_inputs, max_new_tokens=128)
+    output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist()
+    return tokenizer.decode(output_ids, skip_special_tokens=True)
+
+
 def query_chat_api(api_base, model, query, api_key="", timeout=120):
     """Send a query to an OpenAI-compatible chat endpoint and return response text."""
+    import requests
+
     endpoint = f"{api_base.rstrip('/')}/chat/completions"
     headers = {}
     if api_key:
@@ -259,18 +304,31 @@ def main():
         dataset = json.load(f)
 
     print(f"Loaded {len(dataset)} test entries")
-    print(f"Using model: {args.model} via {args.api_base}")
+
+    # Set up inference method
+    local_model = None
+    local_tokenizer = None
+    if args.local:
+        local_model, local_tokenizer = load_local_model(
+            args.model, quantize_4bit=args.quantize_4bit
+        )
+        print(f"Using model: {args.model} (local, 4-bit={args.quantize_4bit})")
+    else:
+        print(f"Using model: {args.model} via {args.api_base}")
 
     # Run evaluation
     results = []
     for entry in tqdm(dataset, desc="Evaluating"):
-        raw_output = query_chat_api(
-            api_base=args.api_base,
-            model=args.model,
-            query=entry["query"],
-            api_key=args.api_key,
-            timeout=args.timeout,
-        )
+        if args.local:
+            raw_output = query_local_model(local_model, local_tokenizer, entry["query"])
+        else:
+            raw_output = query_chat_api(
+                api_base=args.api_base,
+                model=args.model,
+                query=entry["query"],
+                api_key=args.api_key,
+                timeout=args.timeout,
+            )
 
         parsed = parse_guard_output(raw_output)
         predicted = detect_pii(parsed)
