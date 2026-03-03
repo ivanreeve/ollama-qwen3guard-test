@@ -15,8 +15,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Test Qwen3Guard PII detection")
     parser.add_argument(
         "--model",
-        default="sileader/qwen3guard:0.6b",
-        help="Ollama model name (default: sileader/qwen3guard:0.6b)",
+        default="sileader/qwen3guard:4b",
+        help="Ollama model name (default: sileader/qwen3guard:4b)",
     )
     parser.add_argument(
         "--ollama-url",
