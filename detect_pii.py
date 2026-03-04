@@ -57,7 +57,33 @@ def parse_args():
     parser.add_argument(
         "--verbose", action="store_true", help="Show per-query raw model output"
     )
+
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--presidio",
+        action="store_true",
+        help="Use Presidio-only PII detection (no model inference)",
+    )
+    mode.add_argument(
+        "--combined",
+        action="store_true",
+        help="Use Presidio + Qwen3Guard combined detection (logical OR)",
+    )
     return parser.parse_args()
+
+
+def setup_presidio():
+    """Initialize Presidio AnalyzerEngine with default recognizers."""
+    from presidio_analyzer import AnalyzerEngine
+
+    analyzer = AnalyzerEngine()
+    return analyzer
+
+
+def detect_pii_presidio(text, analyzer):
+    """Run Presidio on the given text. Returns True if any PII entities found."""
+    results = analyzer.analyze(text=text, language="en")
+    return len(results) > 0, results
 
 
 def load_local_model(model_name, quantize_4bit=False):
@@ -199,28 +225,40 @@ def compute_metrics(results):
     }
 
 
-def print_report(results, metrics, verbose=False):
+def print_report(results, metrics, verbose=False, mode="qwen3guard"):
     if verbose:
         print("\n  Per-Query Results")
         query_rows = []
+        headers = ["ID", "Result", "Diff", "Type", "Query"]
         for r in results:
             status = "OK" if r["expected"] == r["predicted"] else "MISS"
-            query_rows.append([
+            row = [
                 r["id"],
                 status,
                 r["difficulty"],
                 r["pii_type"],
                 r["query"][:50],
-                r["parsed"].get("safety", "N/A"),
-                r["parsed"].get("categories", "N/A"),
+            ]
+            if mode in ("qwen3guard", "combined"):
+                row.extend([
+                    r["parsed"].get("safety", "N/A"),
+                    r["parsed"].get("categories", "N/A"),
+                ])
+            if mode in ("presidio", "combined"):
+                row.append("Yes" if r.get("presidio_detected") else "No")
+            row.extend([
                 "Yes" if r["expected"] else "No",
                 "Yes" if r["predicted"] else "No",
             ])
-        print(tabulate(
-            query_rows,
-            headers=["ID", "Result", "Diff", "Type", "Query", "Safety", "Categories", "Exp", "Pred"],
-            tablefmt="grid",
-        ))
+            query_rows.append(row)
+
+        if mode in ("qwen3guard", "combined"):
+            headers.extend(["Safety", "Categories"])
+        if mode in ("presidio", "combined"):
+            headers.append("Presidio")
+        headers.extend(["Exp", "Pred"])
+
+        print(tabulate(query_rows, headers=headers, tablefmt="grid"))
 
     cm = metrics["confusion_matrix"]
     print("\n" + "=" * 70)
@@ -307,34 +345,75 @@ def main():
 
     print(f"Loaded {len(dataset)} test entries")
 
-    # Set up inference method
+    # Determine mode
+    if args.presidio:
+        mode = "presidio"
+    elif args.combined:
+        mode = "combined"
+    else:
+        mode = "qwen3guard"
+
+    # Set up Presidio if needed
+    presidio_analyzer = None
+    if mode in ("presidio", "combined"):
+        presidio_analyzer = setup_presidio()
+        print("Presidio analyzer initialized.")
+
+    # Set up model inference if needed
     local_model = None
     local_tokenizer = None
-    if args.local:
-        local_model, local_tokenizer = load_local_model(
-            args.model, quantize_4bit=args.quantize_4bit
-        )
-        print(f"Using model: {args.model} (local, 4-bit={args.quantize_4bit})")
-    else:
-        print(f"Using model: {args.model} via {args.api_base}")
+    use_model = mode in ("qwen3guard", "combined")
+    if use_model:
+        if args.local:
+            local_model, local_tokenizer = load_local_model(
+                args.model, quantize_4bit=args.quantize_4bit
+            )
+            print(f"Using model: {args.model} (local, 4-bit={args.quantize_4bit})")
+        else:
+            print(f"Using model: {args.model} via {args.api_base}")
+
+    print(f"Mode: {mode}")
 
     # Run evaluation
     results = []
     for entry in tqdm(dataset, desc="Evaluating"):
-        if args.local:
-            raw_output = query_local_model(local_model, local_tokenizer, entry["query"])
-        else:
-            raw_output = query_chat_api(
-                api_base=args.api_base,
-                model=args.model,
-                query=entry["query"],
-                api_key=args.api_key,
-                timeout=args.timeout,
+        raw_output = ""
+        parsed = {"safety": None, "categories": [], "refusal": None, "raw": ""}
+        qwen_detected = False
+        presidio_detected = False
+        parse_error = False
+
+        # Qwen3Guard inference
+        if use_model:
+            if args.local:
+                raw_output = query_local_model(
+                    local_model, local_tokenizer, entry["query"]
+                )
+            else:
+                raw_output = query_chat_api(
+                    api_base=args.api_base,
+                    model=args.model,
+                    query=entry["query"],
+                    api_key=args.api_key,
+                    timeout=args.timeout,
+                )
+            parsed = parse_guard_output(raw_output)
+            qwen_detected = detect_pii(parsed)
+            parse_error = parsed["safety"] is None
+
+        # Presidio detection
+        if presidio_analyzer is not None:
+            presidio_detected, presidio_entities = detect_pii_presidio(
+                entry["query"], presidio_analyzer
             )
 
-        parsed = parse_guard_output(raw_output)
-        predicted = detect_pii(parsed)
-        parse_error = parsed["safety"] is None
+        # Determine final prediction
+        if mode == "presidio":
+            predicted = presidio_detected
+        elif mode in ("presidio", "combined"):
+            predicted = qwen_detected or presidio_detected
+        else:
+            predicted = qwen_detected
 
         result = {
             "id": entry["id"],
@@ -347,17 +426,25 @@ def main():
             "raw_output": raw_output,
             "parsed": parsed,
             "parse_error": parse_error,
+            "presidio_detected": presidio_detected,
+            "qwen_detected": qwen_detected,
         }
+        if presidio_analyzer is not None:
+            result["presidio_entities"] = [
+                {"type": e.entity_type, "score": e.score, "start": e.start, "end": e.end}
+                for e in presidio_entities
+            ]
         results.append(result)
 
     # Compute and display metrics
     metrics = compute_metrics(results)
-    print_report(results, metrics, verbose=args.verbose)
+    print_report(results, metrics, verbose=args.verbose, mode=mode)
 
     # Save results
     if args.output:
         output_data = {
-            "model": args.model,
+            "model": args.model if use_model else "presidio-only",
+            "mode": mode,
             "dataset": str(args.dataset),
             "total_entries": len(results),
             "metrics": metrics,
