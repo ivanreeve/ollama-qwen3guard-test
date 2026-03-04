@@ -2,8 +2,10 @@
 """Evaluate Qwen3Guard's PII detection capabilities."""
 
 import argparse
+import base64
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -72,18 +74,167 @@ def parse_args():
     return parser.parse_args()
 
 
+# Entity types that indicate actual PII. We exclude LOCATION, DATE_TIME, NRP,
+# URL, and other generic types that cause false positives on banking/finance text.
+PII_ENTITY_TYPES = {
+    "PERSON",
+    "EMAIL_ADDRESS",
+    "PHONE_NUMBER",
+    "CREDIT_CARD",
+    "IBAN_CODE",
+    "IP_ADDRESS",
+    "MEDICAL_LICENSE",
+    "US_SSN",
+    "US_BANK_NUMBER",
+    "US_DRIVER_LICENSE",
+    "US_PASSPORT",
+    "UK_NHS",
+    "AU_ABN",
+    "AU_ACN",
+    "AU_TFN",
+    "AU_MEDICARE",
+    # Custom recognizers we add below
+    "SG_NRIC_FIN",
+    "PH_TIN",
+    "MY_IC",
+    "TH_NATIONAL_ID",
+    "ID_KTP",
+    "JP_MY_NUMBER",
+    "KR_RRN",
+    "IN_AADHAAR",
+    "IN_PAN",
+}
+
+# Minimum confidence score for a Presidio entity to count as PII.
+PRESIDIO_SCORE_THRESHOLD = 0.4
+
+
+def _build_custom_recognizers():
+    """Build regex-based recognizers for APAC ID formats."""
+    from presidio_analyzer import Pattern, PatternRecognizer
+
+    recognizers = []
+
+    # Singapore NRIC / FIN: [STFGM]\d{7}[A-Z]
+    recognizers.append(PatternRecognizer(
+        supported_entity="SG_NRIC_FIN",
+        patterns=[Pattern("SG_NRIC_FIN", r"\b[STFGM]\d{7}[A-Z]\b", 0.85)],
+        supported_language="en",
+    ))
+
+    # Philippine TIN: 123-456-789-000
+    recognizers.append(PatternRecognizer(
+        supported_entity="PH_TIN",
+        patterns=[Pattern("PH_TIN", r"\b\d{3}-\d{3}-\d{3}-\d{3}\b", 0.8)],
+        supported_language="en",
+    ))
+
+    # Malaysian IC: YYMMDD-SS-NNNN
+    recognizers.append(PatternRecognizer(
+        supported_entity="MY_IC",
+        patterns=[Pattern("MY_IC", r"\b\d{6}-\d{2}-\d{4}\b", 0.8)],
+        supported_language="en",
+    ))
+
+    # Thai National ID: 1-1234-56789-01-2
+    recognizers.append(PatternRecognizer(
+        supported_entity="TH_NATIONAL_ID",
+        patterns=[Pattern("TH_NATIONAL_ID", r"\b\d-\d{4}-\d{5}-\d{2}-\d\b", 0.85)],
+        supported_language="en",
+    ))
+
+    # Indonesian KTP: 16 digits
+    recognizers.append(PatternRecognizer(
+        supported_entity="ID_KTP",
+        patterns=[Pattern("ID_KTP", r"\b\d{16}\b", 0.6)],
+        supported_language="en",
+    ))
+
+    # Japan My Number: 1234 5678 9012 (12 digits, may have spaces)
+    recognizers.append(PatternRecognizer(
+        supported_entity="JP_MY_NUMBER",
+        patterns=[Pattern("JP_MY_NUMBER", r"\b\d{4}\s?\d{4}\s?\d{4}\b", 0.5)],
+        supported_language="en",
+    ))
+
+    # Korea RRN: 850615-1234567
+    recognizers.append(PatternRecognizer(
+        supported_entity="KR_RRN",
+        patterns=[Pattern("KR_RRN", r"\b\d{6}-\d{7}\b", 0.85)],
+        supported_language="en",
+    ))
+
+    # India Aadhaar: 2345 6789 0123 (12 digits with spaces)
+    recognizers.append(PatternRecognizer(
+        supported_entity="IN_AADHAAR",
+        patterns=[Pattern("IN_AADHAAR", r"\b\d{4}\s\d{4}\s\d{4}\b", 0.7)],
+        supported_language="en",
+    ))
+
+    # India PAN: ABCDE1234F
+    recognizers.append(PatternRecognizer(
+        supported_entity="IN_PAN",
+        patterns=[Pattern("IN_PAN", r"\b[A-Z]{5}\d{4}[A-Z]\b", 0.8)],
+        supported_language="en",
+    ))
+
+    return recognizers
+
+
 def setup_presidio():
-    """Initialize Presidio AnalyzerEngine with default recognizers."""
+    """Initialize Presidio AnalyzerEngine with custom APAC recognizers."""
     from presidio_analyzer import AnalyzerEngine
 
     analyzer = AnalyzerEngine()
+    for recognizer in _build_custom_recognizers():
+        analyzer.registry.add_recognizer(recognizer)
     return analyzer
 
 
+def _try_decode_base64(text):
+    """Try to find and decode base64 strings in the text.
+
+    Returns decoded text if a valid base64 segment (20+ chars) is found,
+    otherwise returns None.
+    """
+    b64_pattern = re.compile(r"[A-Za-z0-9+/]{20,}={0,2}")
+    for match in b64_pattern.finditer(text):
+        candidate = match.group()
+        try:
+            decoded = base64.b64decode(candidate).decode("utf-8", errors="strict")
+            # Only accept if it looks like readable text
+            if decoded.isprintable() and len(decoded) > 5:
+                return decoded
+        except Exception:
+            continue
+    return None
+
+
 def detect_pii_presidio(text, analyzer):
-    """Run Presidio on the given text. Returns True if any PII entities found."""
-    results = analyzer.analyze(text=text, language="en")
-    return len(results) > 0, results
+    """Run Presidio on the given text with entity-type filtering and score threshold.
+
+    Also attempts base64 decoding to catch encoded PII.
+    Returns (detected: bool, entities: list).
+    """
+    texts_to_scan = [text]
+
+    # Try to decode any base64 segments and scan those too
+    decoded = _try_decode_base64(text)
+    if decoded:
+        texts_to_scan.append(decoded)
+
+    all_entities = []
+    for scan_text in texts_to_scan:
+        results = analyzer.analyze(
+            text=scan_text,
+            language="en",
+            entities=list(PII_ENTITY_TYPES),
+        )
+        all_entities.extend(results)
+
+    # Filter by score threshold
+    filtered = [e for e in all_entities if e.score >= PRESIDIO_SCORE_THRESHOLD]
+    return len(filtered) > 0, filtered
 
 
 def load_local_model(model_name, quantize_4bit=False):
