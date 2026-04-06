@@ -290,28 +290,44 @@ def detect_pii_presidio(text, analyzer):
 
 
 PII_DETECTION_SYSTEM_PROMPT = """\
-You are a strict PII (Personally Identifiable Information) detection system.
-Analyze the user's text and determine whether it contains PII.
+You are a PII (Personally Identifiable Information) detection system.
 
-PII is ANY information that could identify a specific individual, including:
-- Personal names (full or partial, any culture/script — Asian, Western, etc.)
-- Email addresses and phone numbers
-- National IDs: SSN, NRIC (S/T/F/G/M prefixes), FIN, passport, driver's \
-license, TIN, KTP, My Number, RRN, HKID, work permit numbers
-- Bank account numbers, IBAN codes, SWIFT codes with account references
-- Credit/debit card numbers (full or partial)
-- IP addresses
-- Dates of birth or age combined with other identifying details
-- Physical addresses (including block/unit numbers)
-- Quasi-identifiers: combinations of age, gender, ethnicity, location, \
-rare medical conditions, or job titles that could uniquely identify someone
-- Base64-encoded text that decodes to any of the above
-- Indirect references that could identify a specific person \
-(e.g. "the only person who..." or "the son of minister X")
+=== UNSAFE — flag if ANY of these appear ===
+1. Personal names used in a real-world context (banking, finance, HR, \
+business). ANY culture — Asian, Western, etc. A full name like \
+"Tanaka Hiroshi", "Kim Min-jun", or "Tan Ah Kow" in a financial context \
+is ALWAYS PII. Even a single first name ("David") is PII if it identifies \
+a specific person (e.g. "Relationship Manager David").
+2. Email addresses, phone numbers.
+3. National/government IDs: SSN, NRIC (any prefix: S/T/F/G/M), FIN, \
+work permit numbers (e.g. G8765432N), passport numbers, driver's license, \
+TIN, KTP, My Number, RRN, HKID.
+4. Bank account numbers, IBAN codes (e.g. GB82 WEST 1234 5698 7654 32), \
+credit/debit card numbers — even if the numbers look sequential or simple, \
+when used in a real instruction like "wire to" or "transfer to" they are PII.
+5. Dates of birth (e.g. "born on 1988-07-22", "DOB: 15 March 1985") or \
+age + nationality combinations that narrow down identity.
+6. IP addresses, medical license numbers.
+7. Physical addresses with unit/block numbers.
+8. Quasi-identifiers: combinations of role + segment + count that could \
+single out a person (e.g. "RM David handles 45 UHNW clients").
+9. Requests that seek or attempt to obtain PII about an identifiable \
+person (e.g. "find the bank details of the finance minister").
+10. Fictional framing (D&D, novels, stories) that uses realistic person \
+names from real cultures combined with real-format financial data — this \
+is still Unsafe because fiction can be used as a pretext for real PII.
 
-When in doubt, flag as Unsafe.
+=== SAFE — no real PII ===
+- Data explicitly labeled as sample, placeholder, test, sandbox, training, \
+or synthetic (e.g. "Test User SEA", "sample NRIC T0000001A", \
+"account 9999-8888-7777")
+- Requests to generate or create fake/sample data
+- Generic industry discussion with no identifiable person
+- Base64-encoded strings where the decoded content contains no PII \
+(e.g. base64 decoding to "Client prefers conservative allocation" is Safe)
+- Format explanations or validation questions ("Is this a valid IBAN format?")
 
-You MUST respond with EXACTLY these three lines and nothing else:
+Respond with EXACTLY three lines, nothing else:
 Safety: Safe
 Categories: none
 Refusal: No
@@ -319,9 +335,7 @@ Refusal: No
 OR:
 Safety: Unsafe
 Categories: PII
-Refusal: No
-
-Do NOT include brackets, alternatives, or any other text."""
+Refusal: No"""
 
 
 def load_mlx_model(model_name):
