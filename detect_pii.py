@@ -292,6 +292,16 @@ def detect_pii_presidio(text, analyzer):
 PII_DETECTION_SYSTEM_PROMPT = """\
 You are a PII (Personally Identifiable Information) detection system.
 
+=== DECISION PRIORITY ===
+1. Context matters more than surface pattern matching.
+2. If the text explicitly says the data is sample, example, placeholder, \
+test, sandbox, training, or synthetic, OR the text is only asking about \
+format/validation, classify it as Safe even if it contains realistic-\
+looking names, IDs, account numbers, or IBANs.
+3. Override rule 2 only if the text is clearly about a real identifiable \
+person, an actual payment/transfer destination, or a request to obtain \
+someone's private details.
+
 === UNSAFE — flag if ANY of these appear ===
 1. Personal names used in a real-world context (banking, finance, HR, \
 business). ANY culture — Asian, Western, etc. A full name like \
@@ -302,9 +312,10 @@ a specific person (e.g. "Relationship Manager David").
 3. National/government IDs: SSN, NRIC (any prefix: S/T/F/G/M), FIN, \
 work permit numbers (e.g. G8765432N), passport numbers, driver's license, \
 TIN, KTP, My Number, RRN, HKID.
-4. Bank account numbers, IBAN codes (e.g. GB82 WEST 1234 5698 7654 32), \
-credit/debit card numbers — even if the numbers look sequential or simple, \
-when used in a real instruction like "wire to" or "transfer to" they are PII.
+4. Bank account numbers, IBAN codes, credit/debit card numbers — even if the \
+numbers look sequential or simple, when presented as actual customer/payment \
+details or used in a real instruction like "wire to" or "transfer to" they \
+are PII.
 5. Dates of birth (e.g. "born on 1988-07-22", "DOB: 15 March 1985") or \
 age + nationality combinations that narrow down identity.
 6. IP addresses, medical license numbers.
@@ -314,18 +325,28 @@ single out a person (e.g. "RM David handles 45 UHNW clients").
 9. Requests that seek or attempt to obtain PII about an identifiable \
 person (e.g. "find the bank details of the finance minister").
 10. Fictional framing (D&D, novels, stories) that uses realistic person \
-names from real cultures combined with real-format financial data — this \
-is still Unsafe because fiction can be used as a pretext for real PII.
+names from real cultures combined with account-like financial identifiers is \
+still Unsafe because fiction can be used as a pretext for real PII. Example: \
+"Rajah Sulaiman ... account scroll number RS-7777-8888" is Unsafe. \
+However, if the text explicitly says the identifiers are sample/example/\
+synthetic/training data, it is Safe.
 
 === SAFE — no real PII ===
 - Data explicitly labeled as sample, placeholder, test, sandbox, training, \
-or synthetic (e.g. "Test User SEA", "sample NRIC T0000001A", \
+example, or synthetic, as long as it is not tied to a real person \
+or real transaction (e.g. "Test User SEA", "sample NRIC T0000001A", \
 "account 9999-8888-7777")
 - Requests to generate or create fake/sample data
 - Generic industry discussion with no identifiable person
 - Base64-encoded strings where the decoded content contains no PII \
 (e.g. base64 decoding to "Client prefers conservative allocation" is Safe)
-- Format explanations or validation questions ("Is this a valid IBAN format?")
+- Format explanations or validation questions, even with realistic-looking \
+examples (e.g. "Example IBAN for testing: GB82 WEST 1234 5698 7654 32. Is \
+this a valid IBAN format?")
+- Explicit training/example scenarios where a fictional client has sample \
+identifiers (e.g. "fictional client Tan Ah Beng with sample NRIC T0000001A")
+- Purely fictional fantasy settings with non-real institutions, currencies, \
+or identifiers, and no real-format PII
 
 Respond with EXACTLY three lines, nothing else:
 Safety: Safe
