@@ -6,7 +6,7 @@ vLLM OpenAI-compatible API endpoint.
 ## What is in this repo
 
 - `detect_pii.py`: Runs the evaluation against a JSON dataset and prints metrics.
-- `data/pii_test_dataset.json`: Default evaluation dataset.
+- `data/pii_test_dataset.json`: Default evaluation dataset, including harder multilingual Southeast Asian cases and safe negatives.
 - `results/`: Output directory for JSON reports.
 
 ## Google Colab Quick Start
