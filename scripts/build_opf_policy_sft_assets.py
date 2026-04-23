@@ -569,6 +569,17 @@ subprocess.run(
 )
 """
 
+    code_bake_calibration = """import shutil
+from pathlib import Path
+
+# Bake v5 Viterbi calibration into the SFT checkpoint so OPF auto-discovers it.
+# Without this, the SFT checkpoint uses all-zero biases and loses calibration gains.
+src = Path("calib/recall_v5.json")
+dst = Path("checkpoints/opf_policy_sft_v1/viterbi_calibration.json")
+shutil.copy2(src, dst)
+print(f"Copied {src} -> {dst}")
+"""
+
     code_eval = """# 1. Calibration-only baseline (no SFT) for comparison
 subprocess.run(
     [
@@ -583,7 +594,7 @@ subprocess.run(
     check=True,
 )
 
-# 2. SFT checkpoint (inherits calibration if baked into checkpoint)
+# 2. SFT checkpoint (calibration is baked in via viterbi_calibration.json)
 subprocess.run(
     [
         "python",
@@ -662,6 +673,7 @@ print(f"  regressed_fn: {regressed}")
             md_cell(markdown_recipe),
             code_cell(code_assets),
             code_cell(code_train),
+            code_cell(code_bake_calibration),
             code_cell(code_eval),
             code_cell(code_summary),
         ],
