@@ -1,0 +1,48 @@
+{
+  "purpose": "Benchmark-targeted OPF SFT pack for the feature/openai-privacy-filter branch. Designed to overfit or strongly adapt to the repo benchmark rather than serve as a general-purpose privacy redaction dataset.",
+  "annotation_policy": {
+    "custom_label_space": [
+      "O",
+      "pii"
+    ],
+    "literal_identifier": "Mark minimal explicit PII spans such as names, IDs, emails, or account strings.",
+    "quasi_identifier": "For benchmark-positive uniqueness bundles with no canonical literal span, mark the entire identifying description.",
+    "indirect_request": "For benchmark-positive requests for personal financial details, mark the request clause or full request when that is the minimal positive unit.",
+    "hard_negative": "Leave spans empty for dummy/test/regex/policy/spec text even when it contains PII-like surface forms."
+  },
+  "counts": {
+    "train_examples": 61,
+    "val_examples": 12,
+    "train_positive": 38,
+    "train_negative": 23,
+    "val_positive": 7,
+    "val_negative": 5
+  },
+  "policy_family_counts": {
+    "code_switched_literal_identifier": 1,
+    "encoded_identifier": 1,
+    "hard_negative": 28,
+    "indirect_or_quasi": 1,
+    "indirect_request": 7,
+    "literal_identifier": 11,
+    "literal_person_name": 1,
+    "multilingual_literal_identifier": 6,
+    "obfuscated_literal_identifier": 2,
+    "quasi_identifier": 8,
+    "spelled_out_identifier": 4,
+    "split_identifier": 1,
+    "split_identifier_or_quasi": 2
+  },
+  "source_role_counts": {
+    "hard_negative": 28,
+    "privacy_filter_false_negative": 29,
+    "support_anchor": 9,
+    "validation_anchor": 7
+  },
+  "files": {
+    "train_jsonl": "data/opf_policy_sft_train.jsonl",
+    "val_jsonl": "data/opf_policy_sft_val.jsonl",
+    "label_space_json": "data/opf_policy_label_space.json",
+    "colab_notebook": "notebooks/opf_policy_sft_colab.ipynb"
+  }
+}

@@ -24,6 +24,12 @@ def parse_args():
         help="Model name or path (default: openai/privacy-filter)",
     )
     parser.add_argument(
+        "--opf-viterbi-calibration-path",
+        type=Path,
+        help="Local JSON calibration artifact for the OPF Viterbi decoder "
+             "(Privacy Filter only)",
+    )
+    parser.add_argument(
         "--local",
         action="store_true",
         help="Run inference locally via transformers instead of calling an API",
@@ -452,7 +458,7 @@ def configure_opf_runtime_env(device):
         os.environ["OPF_MOE_TRITON"] = "0"
 
 
-def load_privacy_filter_model(model_name):
+def load_privacy_filter_model(model_name, calibration_path=None):
     """Load OpenAI Privacy Filter via the OPF runtime."""
     from opf import OPF
 
@@ -468,8 +474,15 @@ def load_privacy_filter_model(model_name):
             configure_opf_runtime_env(device)
             print(f"Loading {model_name} via OPF on {device}...")
             redactor = OPF(model=checkpoint, device=device, output_mode="typed")
+            if calibration_path is not None:
+                redactor.set_viterbi_decoder(calibration_path=calibration_path)
             redactor.get_runtime()
-            print(f"OPF runtime configured from {checkpoint}.")
+            calibration_note = (
+                f" with Viterbi calibration {calibration_path}"
+                if calibration_path is not None
+                else ""
+            )
+            print(f"OPF runtime configured from {checkpoint}{calibration_note}.")
             return redactor, device
         except Exception as exc:
             last_error = exc
@@ -814,6 +827,25 @@ def main():
             file=sys.stderr,
         )
         sys.exit(1)
+    if args.opf_viterbi_calibration_path and not privacy_filter_model:
+        print(
+            "Error: --opf-viterbi-calibration-path is only supported for "
+            "openai/privacy-filter.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    opf_viterbi_calibration_path = None
+    if args.opf_viterbi_calibration_path is not None:
+        calibration_path = args.opf_viterbi_calibration_path.expanduser()
+        if not calibration_path.is_file():
+            print(
+                "Error: OPF calibration artifact not found at "
+                f"{calibration_path}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        opf_viterbi_calibration_path = str(calibration_path)
 
     with open(args.dataset) as f:
         dataset = json.load(f)
@@ -851,10 +883,18 @@ def main():
     if use_model:
         if privacy_filter_model:
             privacy_filter_runtime, privacy_filter_device = load_privacy_filter_model(
-                args.model
+                args.model,
+                calibration_path=opf_viterbi_calibration_path,
+            )
+            calibration_note = (
+                f", calibration={opf_viterbi_calibration_path}"
+                if opf_viterbi_calibration_path is not None
+                else ""
             )
             print(
-                f"Using model: {args.model} (opf, device={privacy_filter_device})"
+                "Using model: "
+                f"{args.model} (opf, device={privacy_filter_device}"
+                f"{calibration_note})"
             )
         elif args.mlx:
             mlx_model, mlx_tokenizer = load_mlx_model(args.model)
@@ -974,6 +1014,8 @@ def main():
             "metrics": metrics,
             "results": results,
         }
+        if privacy_filter_model:
+            output_data["opf_viterbi_calibration_path"] = opf_viterbi_calibration_path
         with open(args.output, "w") as f:
             json.dump(output_data, f, indent=2)
         print(f"\nFull results saved to {args.output}")

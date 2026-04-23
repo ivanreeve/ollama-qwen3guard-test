@@ -1,0 +1,7 @@
+{
+  "category_version": "benchmark_binary_v1",
+  "span_class_names": [
+    "O",
+    "pii"
+  ]
+}
