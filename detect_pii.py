@@ -20,8 +20,8 @@ def parse_args():
     )
     parser.add_argument(
         "--model",
-        default="Qwen/Qwen3Guard-Gen-4B",
-        help="Model name or path (default: Qwen/Qwen3Guard-Gen-4B)",
+        default="openai/privacy-filter",
+        help="Model name or path (default: openai/privacy-filter)",
     )
     parser.add_argument(
         "--local",
@@ -363,24 +363,127 @@ def is_privacy_filter_model(model_name):
     return "privacy-filter" in model_name.lower()
 
 
+OPF_CHECKPOINT_ENV_VAR = "OPF_CHECKPOINT"
+OPF_DEFAULT_CHECKPOINT_DIR = Path.home() / ".opf" / "privacy_filter"
+
+
+def has_complete_opf_checkpoint(checkpoint_dir):
+    path = Path(checkpoint_dir).expanduser()
+    return (
+        path.is_dir()
+        and (path / "config.json").is_file()
+        and any(path.glob("*.safetensors"))
+    )
+
+
+def resolve_privacy_filter_checkpoint(model_name):
+    """Return a usable local checkpoint dir for Privacy Filter.
+
+    The upstream OPF helper expects the default cache to be fully promoted into
+    `~/.opf/privacy_filter`. During an interrupted or in-progress first download,
+    only `~/.opf/privacy_filter/original/*` may exist, which causes subsequent
+    runs to fail immediately. We download/resume explicitly and point OPF at the
+    completed checkpoint directory directly.
+    """
+    model_path = Path(model_name).expanduser()
+    if model_path.exists():
+        return str(model_path)
+
+    env_checkpoint = os.environ.get(OPF_CHECKPOINT_ENV_VAR, "")
+    if env_checkpoint:
+        return str(Path(env_checkpoint).expanduser())
+
+    cache_root = OPF_DEFAULT_CHECKPOINT_DIR
+    original_dir = cache_root / "original"
+
+    if has_complete_opf_checkpoint(cache_root):
+        return str(cache_root)
+    if has_complete_opf_checkpoint(original_dir):
+        return str(original_dir)
+
+    from huggingface_hub import snapshot_download
+
+    print(
+        "Privacy Filter checkpoint not found locally. "
+        f"Downloading/resuming {model_name!r} into {cache_root}...",
+        flush=True,
+    )
+    snapshot_download(
+        repo_id=model_name,
+        local_dir=str(cache_root),
+        allow_patterns=["original/*"],
+    )
+
+    if has_complete_opf_checkpoint(original_dir):
+        return str(original_dir)
+    if has_complete_opf_checkpoint(cache_root):
+        return str(cache_root)
+
+    raise RuntimeError(
+        "Privacy Filter checkpoint download completed without a usable "
+        f"checkpoint directory under {cache_root}."
+    )
+
+
 def pick_torch_device():
     try:
         import torch
     except ImportError:
         return "cpu"
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    if torch.cuda.is_available():
+        return "cuda"
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def configure_opf_runtime_env(device):
+    """Disable Triton-backed OPF kernels unless they are actually usable."""
+    if device != "cuda":
+        os.environ["OPF_MOE_TRITON"] = "0"
+        return
+
+    if os.environ.get("OPF_MOE_TRITON"):
+        return
+
+    try:
+        import triton  # noqa: F401
+    except ModuleNotFoundError:
+        os.environ["OPF_MOE_TRITON"] = "0"
 
 
 def load_privacy_filter_model(model_name):
     """Load OpenAI Privacy Filter via the OPF runtime."""
     from opf import OPF
 
-    device = pick_torch_device()
-    checkpoint = None if model_name.lower() == "openai/privacy-filter" else model_name
-    print(f"Loading {model_name} via OPF on {device}...")
-    redactor = OPF(model=checkpoint, device=device, output_mode="typed")
-    print("OPF runtime configured.")
-    return redactor, device
+    checkpoint = resolve_privacy_filter_checkpoint(model_name)
+    preferred_device = pick_torch_device()
+    candidate_devices = [preferred_device]
+    if preferred_device != "cpu":
+        candidate_devices.append("cpu")
+
+    last_error = None
+    for device in candidate_devices:
+        try:
+            configure_opf_runtime_env(device)
+            print(f"Loading {model_name} via OPF on {device}...")
+            redactor = OPF(model=checkpoint, device=device, output_mode="typed")
+            redactor.get_runtime()
+            print(f"OPF runtime configured from {checkpoint}.")
+            return redactor, device
+        except Exception as exc:
+            last_error = exc
+            if device == candidate_devices[-1]:
+                break
+            print(
+                f"OPF load failed on {device}: {exc}. Retrying on cpu...",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    raise RuntimeError(
+        f"Failed to load {model_name} via OPF from {checkpoint}: {last_error}"
+    ) from last_error
 
 
 def load_mlx_model(model_name):

@@ -4,8 +4,8 @@ Lightweight evaluation harness for testing PII detection models.
 
 Currently supported backends:
 
-- `Qwen/Qwen3Guard-Gen-4B` and similar guard/chat models through a vLLM OpenAI-compatible API endpoint.
 - `openai/privacy-filter` through OpenAI's local OPF runtime.
+- `Qwen/Qwen3Guard-Gen-4B` and similar guard/chat models through a vLLM OpenAI-compatible API endpoint.
 
 ## What is in this repo
 
@@ -65,7 +65,7 @@ python -m vllm.entrypoints.openai.api_server \
 Run evaluator:
 
 ```bash
-python detect_pii.py --api-base http://localhost:8000/v1
+python detect_pii.py --model Qwen/Qwen3Guard-Gen-4B --api-base http://localhost:8000/v1
 ```
 
 ### OpenAI Privacy Filter
@@ -76,7 +76,6 @@ the `opf` runtime.
 
 ```bash
 python detect_pii.py \
-  --model openai/privacy-filter \
   --output results/privacy-filter.json \
   --verbose
 ```
@@ -89,7 +88,7 @@ Notes:
 ## CLI options
 
 ```text
---model MODEL              Model name (default: Qwen/Qwen3Guard-Gen-4B)
+--model MODEL              Model name (default: openai/privacy-filter)
 --local                    Run inference locally via transformers (no server needed)
 --4bit                     Use 4-bit quantization via bitsandbytes (requires --local)
 --api-base API_BASE        OpenAI-compatible API base URL (default: http://localhost:8000/v1)
