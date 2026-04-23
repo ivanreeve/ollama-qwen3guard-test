@@ -389,7 +389,8 @@ def main() -> int:
         raise ValueError("No train windows were produced")
 
     model = Transformer.from_checkpoint(checkpoint, device=device)
-    model = model.to(dtype=torch.float32)
+    # Keep backbone in native dtype (bf16) to save memory on T4.
+    # Only the trainable output head is cast to fp32 after freezing.
     output_head_remap_stats = OutputHeadRemapStats(exact_rows_copied=0, fallback_rows_copied=0)
     output_head_reinitialized = False
     if tuple(resolved_ner_class_names) != tuple(base_ner_class_names):
@@ -402,6 +403,8 @@ def main() -> int:
         output_head_reinitialized = True
 
     frozen_params = freeze_backbone(model)
+    # Cast only the trainable head to fp32 for stable gradient updates.
+    model.unembedding.to(dtype=torch.float32)
     trainable_params = [param for param in model.parameters() if param.requires_grad]
     trainable_param_count = sum(param.numel() for param in trainable_params)
 
