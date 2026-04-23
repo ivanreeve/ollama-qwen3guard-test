@@ -366,7 +366,18 @@ Refusal: No"""
 
 
 def is_privacy_filter_model(model_name):
-    return "privacy-filter" in model_name.lower()
+    if "privacy-filter" in model_name.lower():
+        return True
+    # Detect local OPF SFT checkpoints by looking for OPF-specific config keys.
+    model_path = Path(model_name).expanduser()
+    config_path = model_path / "config.json"
+    if config_path.is_file():
+        try:
+            config = json.loads(config_path.read_text())
+            return "ner_class_names" in config or "span_class_names" in config
+        except (json.JSONDecodeError, OSError):
+            pass
+    return False
 
 
 OPF_CHECKPOINT_ENV_VAR = "OPF_CHECKPOINT"
